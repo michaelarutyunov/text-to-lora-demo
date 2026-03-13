@@ -1,0 +1,23 @@
+# Colab-specific requirements (run via !pip install in notebooks)
+# Tested on Colab Pro with T4 / A100
+
+# Hugging Face core
+transformers>=4.40.0
+accelerate>=0.29.0
+huggingface_hub>=0.22.0
+datasets>=2.18.0
+evaluate>=0.4.0
+
+# Fine-tuning
+peft>=0.10.0
+bitsandbytes>=0.43.0  # QLoRA — must match CUDA version on Colab
+
+# Data / eval utilities
+scikit-learn>=1.4.0
+pandas>=2.0.0
+matplotlib>=3.8.0
+seaborn>=0.13.0
+tqdm>=4.66.0
+
+# NOTE: torch is pre-installed on Colab — do not reinstall, it will break CUDA
+# NOTE: scipy is pre-installed on Colab
