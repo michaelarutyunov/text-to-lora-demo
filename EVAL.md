@@ -243,3 +243,268 @@ solution_approach       0.67      0.28      0.39        29
 **Next priority**: Address class imbalance through either (a) reweighting/oversampling techniques, or (b) collecting more rare class examples. Expected macro F1 improvement: 0.32 → 0.45+.
 
 **Overall assessment**: Successful proof-of-concept for Text-to-LoRA applied to JTBD node classification. Fine-tuning significantly outperforms zero-shot prompting, validating the hypothesis that task-specific adapter training is effective for this NLP classification task.
+
+---
+
+## Next Steps
+
+### Immediate (Week 1)
+
+#### 1. Retrieve and Analyze Confusion Matrix
+**Goal**: Understand which classes are being confused
+
+**Action**:
+```bash
+# Download from HF Jobs output
+# Location: https://huggingface.co/jobs (find evaluation job)
+# File: stage2_confusion_matrix.png
+```
+
+**Deliverable**: Add confusion matrix analysis to EVAL.md documenting:
+- Top 3 class confusions (e.g., job_context → job_statement)
+- Asymmetric confusions (A → B but not B → A)
+- Which confusions are most harmful for your use case
+
+**Effort**: 30 minutes
+
+---
+
+#### 2. Update Baselines Notebook
+**Goal**: Visual comparison of all 3 stages in one place
+
+**Action**: Add this cell to `notebooks/01_baselines.ipynb`:
+
+```python
+# ── Stage 2: QLoRA fine-tuned ─────────────────────────────────────────────────
+from peft import PeftModel
+
+QLORA_ADAPTER = "michaelarutyunov/jtbd-qlora-mistral7b"
+
+print('Loading QLoRA adapter...')
+stage2_model = PeftModel.from_pretrained(model, QLORA_ADAPTER)
+stage2_model.eval()
+
+_orig_model = model
+model = stage2_model
+
+stage2_preds, stage2_labels = [], []
+for ex in tqdm(test_examples, desc='Stage 2'):
+    prompt = format_prompt(ex, include_answer=False)
+    pred = predict_label(prompt)
+    stage2_preds.append(pred)
+    stage2_labels.append(ex['node_type'])
+
+model = _orig_model
+
+acc2 = sum(p == l for p, l in zip(stage2_preds, stage2_labels)) / len(stage2_labels)
+unknown2 = sum(p == 'unknown' for p in stage2_preds) / len(stage2_preds) * 100
+print(f'\nStage 2 accuracy: {acc2:.3f}')
+print(f'Unknown: {unknown2:.1f}%')
+```
+
+Then update the comparison table to include Stage 2 metrics.
+
+**Effort**: 15 minutes
+
+---
+
+### Short-term (Weeks 2-3)
+
+#### 3. Implement Class-Weighted Training
+**Goal**: Improve rare class performance (job_context, social_job)
+
+**Why**: Current model optimizes for majority classes. Weighting the loss function will force the model to pay attention to rare classes.
+
+**Action Plan**:
+
+1. **Compute class weights** (add to `scripts/train_qlora_hf_jobs.py`):
+```python
+import numpy as np
+
+class_counts = np.array([291, 156, 94, 94, 55, 55, 31, 8])  # pain_point, gain_point, ...
+class_weights = 1.0 / np.sqrt(class_counts)
+class_weights = class_weights / class_weights.sum()  # normalize
+
+# Pass to trainer
+training_args = SFTConfig(
+    ...,
+    class_weights=class_weights,  # Need to verify TRL supports this
+)
+```
+
+2. **Re-train with weights**:
+```bash
+hf jobs uv run \
+    --flavor a10g-large \
+    --timeout 2h \
+    --secrets HF_TOKEN \
+    scripts/train_qlora_hf_jobs.py
+```
+
+3. **Evaluate improvement**:
+```bash
+hf jobs uv run \
+    --flavor a10g-small \
+    --timeout 30m \
+    --secrets HF_TOKEN \
+    scripts/evaluate_qlora_hf_jobs.py
+```
+
+**Expected outcome**:
+- Majority class accuracy drops slightly (55% → 50%)
+- Rare class recall improves (job_context: 0% → 20-30%)
+- Macro F1 increases (0.32 → 0.40+)
+
+**Effort**: 2 hours (mostly waiting for jobs)
+
+---
+
+#### 4. Collect Additional Rare Class Data
+**Goal**: Improve model calibration across all classes
+
+**Why**: Some classes have <8% of training data. More examples = better learning.
+
+**Action Plan**:
+
+1. **Audit existing interviews**:
+   - Check `interview-system-v2/synthetic_interviews` for unused examples
+   - Look for mislabeled or edge cases that could be relabeled
+
+2. **Prioritize by expected impact**:
+   - `job_context`: Need +50 examples (current: 55)
+   - `job_statement`: Need +50 examples (current: 55)
+   - `job_trigger`: Need +30 examples (current: 31)
+   - `social_job`: Need +20 examples (current: 8)
+
+3. **Generate synthetic examples**:
+   - Use GPT-4/Claude to generate synthetic interview quotes
+   - Manual review and labeling
+   - Add to `data/processed/`
+
+4. **Retrain with balanced dataset**:
+   - Total target: ~1,000 training examples (vs 780 current)
+   - Better class distribution: each class ≥5%
+
+**Expected outcome**:
+- All classes achieve ≥20% recall
+- Macro F1 increases to 0.45+
+- Accuracy stabilizes around 55-60%
+
+**Effort**: 4-8 hours (data collection + retraining)
+
+---
+
+### Medium-term (Month 2)
+
+#### 5. Experiment with Larger LoRA Rank
+**Goal**: Increase model capacity to capture more nuanced patterns
+
+**Why**: Current r=8 is modest. Larger rank = more adaptable parameters.
+
+**Action**: Modify `scripts/train_qlora_hf_jobs.py`:
+```python
+LORA_R = 16  # or 32
+LORA_ALPHA = 32  # 2x rank (standard practice)
+```
+
+Re-train and evaluate. Compare with r=8 baseline.
+
+**Expected outcome**: Marginal gain (1-3% accuracy) if data is the bottleneck.
+
+**Effort**: 2 hours
+
+---
+
+#### 6. Try Alternative Loss Functions
+**Goal**: Better handle class imbalance and hard examples
+
+**Options to explore**:
+
+1. **Focal Loss**: Down-weight easy (majority class) examples
+   ```python
+   # Need custom training loop or library support
+   focal_gamma = 2.0
+   focal_alpha = class_weights
+   ```
+
+2. **Label smoothing**: Prevent overconfident predictions
+   ```python
+   training_args = SFTConfig(
+       ...,
+       label_smoothing_factor=0.1,
+   )
+   ```
+
+3. **Hard example mining**: Focus training on misclassified examples
+
+**Expected outcome**: Better calibration, 2-5% macro F1 improvement.
+
+**Effort**: 4-8 hours (implementation + tuning)
+
+---
+
+### Long-term (Months 3-6)
+
+#### 7. Explore Alternative Architectures
+**Goal**: Push performance beyond QLoRA ceiling
+
+**Options**:
+- Full fine-tuning (if compute allows)
+- AdapterFusion (merge multiple task adapters)
+- PEFT with larger base models (Llama-3-8B, Mistral-8x7B)
+
+**Expected outcome**: Diminishing returns; data quality > model size.
+
+---
+
+#### 8. Production Deployment
+**Goal**: Deploy model for real-world JTBD classification
+
+**Considerations**:
+- Inference latency (QLoRA adds overhead)
+- Batch vs real-time classification
+- Model monitoring and drift detection
+- A/B testing against baseline
+
+**Effort**: 2-4 weeks (engineering + testing)
+
+---
+
+## Recommended Execution Order
+
+**If you want quick wins** (1-2 weeks):
+1. Retrieve confusion matrix
+2. Update baselines notebook
+3. Implement class-weighted training
+
+**If you want maximum performance** (1-2 months):
+1. Collect rare class data (+150 examples)
+2. Implement class-weighted training
+3. Experiment with larger LoRA rank
+4. Try focal loss
+
+**If you want production readiness** (3-6 months):
+1. All of the above
+2. Explore alternative architectures
+3. Build deployment pipeline
+4. Monitor and iterate
+
+---
+
+## Success Metrics
+
+**Minimum viable** (current state achieved):
+- ✅ Beat zero-shot baseline (55.8% vs 42.6%)
+- ✅ All predictions valid (0% unknown)
+- ✅ Documentation complete
+
+**Good** (next milestone):
+- Macro F1 ≥ 0.40
+- All classes ≥20% recall
+- Accuracy ≥ 55% maintained
+
+**Excellent** (stretch goal):
+- Macro F1 ≥ 0.50
+- All classes ≥40% recall
+- Accuracy ≥ 60%
+- Confusion matrix shows clear decision boundaries
