@@ -224,7 +224,7 @@ solution_approach       0.67      0.28      0.39        29
 - **Validation loss**: Tracked but not reported here
 
 ### Outputs
-- **Confusion matrix**: `stage2_confusion_matrix.png` (saved from evaluation job)
+- **Confusion matrix**: https://huggingface.co/michaelarutyunov/jtbd-qlora-mistral7b/blob/main/stage2_confusion_matrix.png
 - **Classification report**: Included above
 - **Comparison table**: Included above
 
