@@ -217,3 +217,11 @@ checkpoints/
 # Local secrets
 .env
 secrets.json
+
+# custom
+.ruff_cache/
+notebooks/
+docs/superpowers/
+.claude/
+docs/
+

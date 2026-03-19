@@ -2101,9 +2101,223 @@ outputs/test2/evaluation/
 ✅ Supports all 24 conditions
 ✅ Generates all 3 required plots
 ✅ Outputs metrics.json and summary.csv
-✅ Memory management for A100 40GB
 ✅ Graceful degradation for missing adapters
 ✅ Follows project conventions (ruff, ruff format)
+✅ Opus review: 6 bugs found and fixed (see below)
 ⏳ Run on HF Jobs with real adapters (pending Phases 2-4)
 ⏳ Document results in EVAL.md (pending evaluation completion)
 
+---
+
+## Phase 5 — Opus Review (March 18, 2026)
+
+### Review Summary
+
+Opus reviewed `evaluate_conditions.py` for correctness. Found **6 bugs** (1 critical, 2 medium, 3 minor). All fixed.
+
+### Bug 1 (Critical): Same PEFT `del model` bug as Phase 4
+
+**Problem**: Every `evaluate_stage_*` function used `del model; torch.cuda.empty_cache()` to clean up. As established in Phase 4 review, `PeftModel.from_pretrained()` mutates `base_model` in-place. `del model` does not reverse this. After stage 1a, `base_model` still has T2L LoRA layers — stage 1b stacks D2L on corrupted base → garbage results for all subsequent stages.
+
+**Fix**: Created `cleanup_adapter()` helper using `model.unload()`. All evaluate functions now return `tuple[Optional[dict], base_model]` so clean base model propagates through the evaluation chain.
+
+### Bug 2 (Medium): Adapter repo IDs don't match Phases 2-3
+
+**Problem**: Adapter IDs used different naming conventions than the actual repos created in earlier phases:
+- D2L: `jtbd-d2l-mistral7b` vs actual `jtbd-d2l-mistral7b-methodology`
+- T2L: `jtbd-t2l-job-trigger-mistral7b` vs actual `jtbd-t2l-jobtrigger`
+
+**Fix**: Updated all IDs to match Phase 4's `validate_lora_stacking.py` (source of truth).
+
+### Bug 3 (Medium): `set_adapter(["default", "d2l"])` on non-overlapping modules
+
+**Problem**: `load_stacked_adapters()` called `model.set_adapter(["default", "d2l"])`. For non-overlapping modules (D2L: `down_proj`, T2L: `q_proj/v_proj`), both adapters are active by default — `set_adapter` with a list is for overlapping modules and may error.
+
+**Fix**: Removed `set_adapter` call. Aligned adapter loading pattern with Phase 4 script (D2L first via `PeftModel.from_pretrained`, T2L via `load_adapter`).
+
+### Bug 4 (Minor): Hardcoded absolute paths
+
+**Problem**: `DATA_DIR` and `OUTPUT_DIR` used `/home/mikhailarutyunov/...` — breaks on HF Jobs.
+
+**Fix**: Changed to relative paths via `Path(__file__).resolve().parent.parent.parent`.
+
+### Bug 5 (Minor): Unnecessary `trust_remote_code=True`
+
+**Problem**: Mistral-7B-Instruct-v0.2 doesn't need `trust_remote_code`. Unnecessary security surface.
+
+**Fix**: Removed.
+
+### Bug 6 (Minor): `torch.float16` vs `torch.bfloat16` inconsistency
+
+**Problem**: Phase 4 uses `bfloat16`, Phase 5 used `float16`. `bfloat16` is preferred on A100 (better dynamic range, native hardware support).
+
+**Fix**: Changed to `bfloat16` for consistency.
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `scripts/test2/evaluate_conditions.py` | Fixed all 6 bugs |
+
+### Remaining Pyright Warnings (Acceptable)
+
+- `model.unload()` return type: Pyright can't resolve PEFT's dynamic dispatch — works at runtime
+- `zero_division=0.0` in sklearn metrics: Known sklearn typing issue (accepts `int|float|str` at runtime, pyright sees only `str`)
+- `fig` unused in matplotlib plotting functions: Standard matplotlib pattern
+
+---
+
+## QLoRA Training Script — Implemented March 19, 2026
+
+### Overview
+
+Created `scripts/test2/train_qlora_hf_jobs.py` — the missing QLoRA training pipeline for Stage 2 evaluation. The evaluation script (`evaluate_conditions.py`) expects 12 QLoRA adapters (3 detectors × 4 dataset sizes) but had no script to train them. The old Test 1 script (`scripts/train_qlora_hf_jobs.py`) was deleted and targeted 8-class multiclass classification, not binary yes/no.
+
+### What Was Implemented
+
+#### ✅ Created: `scripts/test2/train_qlora_hf_jobs.py` (~280 lines)
+
+**Key Features**:
+1. **Single HF Jobs submission** trains all 12 adapters sequentially (~6-8h on A100)
+2. **TRL SFTTrainer** for supervised fine-tuning (matches deleted Test 1 pattern)
+3. **4-bit quantization** via bitsandbytes (NF4 + double quantization)
+4. **Adaptive training** — epochs/batch/grad_accum tuned per dataset size
+5. **Auto-updates** `QLORA_ADAPTERS` in `evaluate_conditions.py` after training
+6. **Deterministic subsampling** — sort by `(source_file, turn_number)`, then slice
+
+**Script Structure**:
+```
+train_qlora_hf_jobs.py
+├── Configuration (base model, detectors, sizes, LoRA config)
+├── load_and_subsample()     → Load JSONL, deterministic subsample
+├── format_training_example() → Match evaluate_conditions.py prompt format
+├── prepare_dataset()         → Convert to HF Dataset with "text" field
+├── load_base_model()         → 4-bit quantized Mistral-7B
+├── load_tokenizer()          → Padding configured for causal LM
+├── train_one()               → Full training loop for one (detector, size) combo
+├── update_evaluate_script()  → Regex replacement of None → Hub ID
+├── _replace_in_detector_block() → Block-scoped regex to avoid cross-detector replacement
+└── main()                    → Loop all 12 combos, collect results, update eval script
+```
+
+### Key Decisions & Rationale
+
+#### 1. Adaptive Training by Dataset Size
+
+**Decision**: Scale epochs inversely with dataset size to ensure sufficient training steps.
+
+| Size | Epochs | Batch | Grad Accum | Effective Batch | ~Steps |
+|------|--------|-------|------------|-----------------|--------|
+| 50   | 10     | 2     | 4          | 8               | ~62    |
+| 100  | 6      | 2     | 4          | 8               | ~75    |
+| 200  | 4      | 2     | 8          | 16              | ~50    |
+| full | 3      | 2     | 8          | 16              | ~45    |
+
+**Rationale**: With 50 examples at 3 epochs, you get ~19 steps — not enough for convergence. Scaling to 10 epochs yields ~62 steps, comparable to training on full dataset.
+
+#### 2. Fresh Model Per Run
+
+**Decision**: Load a new 4-bit model for each of the 12 training runs.
+
+**Rationale**: `PeftModel` mutates the base model in-place (as documented in Phase 4 review). Reusing the model between runs risks adapter contamination — optimizer state and LoRA layers from the previous run could leak into the next. Fresh model per run is the safe approach.
+
+**Trade-off**: ~2-3 min model load overhead per run × 12 = ~30 min total. Acceptable within the 8h budget.
+
+#### 3. Deterministic Subsampling
+
+**Decision**: Sort training data by `(source_file, turn_number)` before slicing to `n` examples.
+
+**Rationale**: Ensures the 50-example subset is always contained within the 100-example subset, which is contained within 200, which is contained within full. This makes the learning curve monotonically comparable — larger datasets always include everything smaller datasets saw.
+
+#### 4. Prompt Format Alignment
+
+**Decision**: Match `evaluate_conditions.py:format_prompt()` exactly.
+
+**Format**:
+```
+<s>[INST] [UTTERANCE]: {utterance}
+Does this contain a {detector label}? Answer yes or no.
+Answer: [/INST]{label}</s>
+```
+
+**Rationale**: Training and evaluation must use identical prompt formats. Mismatched prompts degrade adapter performance (same issue caught in Phase 4 review, Bug 2).
+
+#### 5. LoRA Config Matches T2L
+
+**Decision**: `r=8, alpha=16, target_modules=[q_proj, v_proj], dropout=0.05`.
+
+**Rationale**: QLoRA must target the same modules as T2L for a fair Stage 1 vs Stage 2 comparison. If QLoRA used different modules (e.g., all linear layers), performance differences could be attributed to parameter count rather than training method.
+
+#### 6. Auto-Update of evaluate_conditions.py
+
+**Decision**: Script programmatically replaces `None` values in `QLORA_ADAPTERS` dict using block-scoped regex.
+
+**Rationale**: After an 8-hour training run, manually copying 12 Hub IDs is error-prone. The block-scoped regex ensures each `None` is replaced only within the correct detector's dict block (avoiding cross-detector replacement).
+
+### Dependencies Added
+
+**File**: `requirements.txt`
+- Added `trl>=0.12.0` (SFTTrainer for QLoRA training)
+
+### Hub Repos Created (After Training)
+
+```
+michaelarutyunov/jtbd-qlora-job_trigger-50
+michaelarutyunov/jtbd-qlora-job_trigger-100
+michaelarutyunov/jtbd-qlora-job_trigger-200
+michaelarutyunov/jtbd-qlora-job_trigger-full
+michaelarutyunov/jtbd-qlora-solution_approach-50
+michaelarutyunov/jtbd-qlora-solution_approach-100
+michaelarutyunov/jtbd-qlora-solution_approach-200
+michaelarutyunov/jtbd-qlora-solution_approach-full
+michaelarutyunov/jtbd-qlora-pain_point-50
+michaelarutyunov/jtbd-qlora-pain_point-100
+michaelarutyunov/jtbd-qlora-pain_point-200
+michaelarutyunov/jtbd-qlora-pain_point-full
+```
+
+### How to Run
+
+```bash
+# Submit to HuggingFace Jobs
+hf jobs submit \
+  --flavor a100-large \
+  --timeout 8h \
+  --secrets HF_TOKEN \
+  uv run scripts/test2/train_qlora_hf_jobs.py
+```
+
+**Expected Runtime**: ~6-8 hours total on A100
+- 12 runs × ~30 min each (model load + training + push)
+
+### Files Created/Modified
+
+| File | Action | Purpose |
+|------|--------|---------|
+| `scripts/test2/train_qlora_hf_jobs.py` | **Created** | QLoRA training for 12 adapters |
+| `requirements.txt` | **Modified** | Added `trl>=0.12.0` |
+
+### Next Steps
+
+1. ⏳ **Submit to HF Jobs**: Run training script on A100
+2. ⏳ **Verify adapters**: Check all 12 repos on HF Hub
+3. ⏳ **Verify auto-update**: Confirm `QLORA_ADAPTERS` in evaluate_conditions.py has real Hub IDs
+4. ⏳ **Run full evaluation**: Submit evaluate_conditions.py with all adapters available
+
+### Acceptance Criteria
+
+✅ Script uses TRL SFTTrainer (matches project pattern)
+✅ PEP 723 format for HF Jobs
+✅ LoRA config matches T2L (r=8, alpha=16, q_proj+v_proj)
+✅ Prompt format matches evaluate_conditions.py
+✅ Adaptive training by dataset size
+✅ Deterministic subsampling (nested subsets)
+✅ Auto-updates evaluate_conditions.py
+✅ Passes ruff check and ruff format
+⏳ Runs successfully on HF Jobs
+⏳ All 12 adapters pushed to Hub
+
+---
+
+**Last Updated**: March 19, 2026
+**Status**: Script Complete ✅ | Pending HF Jobs Submission ⏳

@@ -28,6 +28,7 @@ Outputs:
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -52,43 +53,51 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 # =============================================================================
 
 BASE_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+HF_TOKEN = os.environ.get("HF_TOKEN")
+
+# HuggingFace dataset repository IDs (one per detector)
+DATASET_REPOS = {
+    "job_trigger": "michaelarutyunov/jtbd-binary-job-trigger",
+    "solution_approach": "michaelarutyunov/jtbd-binary-solution-approach",
+    "pain_point": "michaelarutyunov/jtbd-binary-pain-point",
+}
 
 # HuggingFace repository IDs (to be created during Phase 2-4)
-D2L_ADAPTER_ID = "michaelarutyunov/jtbd-d2l-mistral7b"  # TODO: Update after Phase 2
+D2L_ADAPTER_ID = "michaelarutyunov/jtbd-d2l-mistral7b-methodology"
 T2L_ADAPTERS = {
-    "job_trigger": "michaelarutyunov/jtbd-t2l-job-trigger-mistral7b",  # TODO: Update after Phase 3
-    "solution_approach": "michaelarutyunov/jtbd-t2l-solution-approach-mistral7b",  # TODO: Update after Phase 3
-    "pain_point": "michaelarutyunov/jtbd-t2l-pain-point-mistral7b",  # TODO: Update after Phase 3
+    "job_trigger": "michaelarutyunov/jtbd-t2l-jobtrigger",
+    "solution_approach": "michaelarutyunov/jtbd-t2l-solutionapproach",
+    "pain_point": "michaelarutyunov/jtbd-t2l-painpoint",
 }
 
 QLORA_ADAPTERS = {
     # QLoRA adapters trained on 50, 100, 200, full examples
     # TODO: Update after QLoRA training
     "job_trigger": {
-        "50": None,
-        "100": None,
-        "200": None,
-        "full": None,
+        "50": "michaelarutyunov/jtbd-qlora-job_trigger-50",
+        "100": "michaelarutyunov/jtbd-qlora-job_trigger-100",
+        "200": "michaelarutyunov/jtbd-qlora-job_trigger-200",
+        "full": "michaelarutyunov/jtbd-qlora-job_trigger-full",
     },
     "solution_approach": {
-        "50": None,
-        "100": None,
-        "200": None,
-        "full": None,
+        "50": "michaelarutyunov/jtbd-qlora-solution_approach-50",
+        "100": "michaelarutyunov/jtbd-qlora-solution_approach-100",
+        "200": "michaelarutyunov/jtbd-qlora-solution_approach-200",
+        "full": "michaelarutyunov/jtbd-qlora-solution_approach-full",
     },
     "pain_point": {
-        "50": None,
-        "100": None,
-        "200": None,
-        "full": None,
+        "50": "michaelarutyunov/jtbd-qlora-pain_point-50",
+        "100": "michaelarutyunov/jtbd-qlora-pain_point-100",
+        "200": "michaelarutyunov/jtbd-qlora-pain_point-200",
+        "full": "michaelarutyunov/jtbd-qlora-pain_point-full",
     },
 }
 
-# Local dataset paths
-DATA_DIR = Path("/home/mikhailarutyunov/projects/text-to-lora-demo/data/test2")
-OUTPUT_DIR = Path(
-    "/home/mikhailarutyunov/projects/text-to-lora-demo/outputs/test2/evaluation"
-)
+# Local dataset paths (relative to script location for HF Jobs compatibility)
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _SCRIPT_DIR.parent.parent
+DATA_DIR = _PROJECT_ROOT / "data" / "test2"
+OUTPUT_DIR = _PROJECT_ROOT / "outputs" / "test2" / "evaluation"
 
 # Device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -100,16 +109,30 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def load_test_data(detector_name: str) -> Dataset:
-    """Load test set for a specific detector."""
+    """Load test set for a specific detector.
+
+    Tries local JSONL first (dev runs), falls back to HF Hub (HF Jobs).
+    Hub datasets have int labels (0/1); these are converted back to strings.
+    """
     test_file = DATA_DIR / f"{detector_name}_test.jsonl"
 
-    examples = []
-    with open(test_file) as f:
-        for line in f:
-            if line.strip():
-                examples.append(json.loads(line))
+    if test_file.exists():
+        examples = []
+        with open(test_file) as f:
+            for line in f:
+                if line.strip():
+                    examples.append(json.loads(line))
+        return Dataset.from_list(examples)
 
-    return Dataset.from_list(examples)
+    # HF Jobs: local data/test2/ not available — download from Hub
+    from datasets import load_dataset as hf_load_dataset
+
+    repo_id = DATASET_REPOS[detector_name]
+    print(f"Local data not found, downloading from Hub: {repo_id}")
+    ds = hf_load_dataset(repo_id, split="test", token=HF_TOKEN)
+    # Hub stores labels as int (0=no, 1=yes); convert back to strings
+    ds = ds.map(lambda x: {"label": "yes" if x["label"] == 1 else "no"})
+    return ds
 
 
 # =============================================================================
@@ -143,37 +166,52 @@ def extract_answer(output_text: str) -> str:
 def load_base_model():
     """Load base Mistral-7B model and tokenizer."""
     print(f"Loading base model: {BASE_MODEL}")
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
     model = AutoModelForCausalLM.from_pretrained(
         BASE_MODEL,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
         device_map="auto",
-        trust_remote_code=True,
     )
     model.eval()
     return model, tokenizer
 
 
 def load_adapter(model, adapter_id: str):
-    """Load a single adapter onto the model."""
+    """Load a single adapter onto the model. Mutates model in-place."""
     if adapter_id is None:
         return model
     print(f"Loading adapter: {adapter_id}")
     return PeftModel.from_pretrained(model, adapter_id, is_trainable=False)
 
 
+def cleanup_adapter(model) -> object:
+    """Unload adapter and return clean base model.
+
+    CRITICAL: PeftModel.from_pretrained mutates base_model in-place.
+    `del model` does NOT reverse this. Must use model.unload().
+    """
+    if isinstance(model, PeftModel):
+        clean = model.unload()
+        del model
+        torch.cuda.empty_cache()
+        return clean
+    return model
+
+
 def load_stacked_adapters(base_model, d2l_id: str, t2l_id: str):
-    """Load D2L + T2L adapters stacked."""
+    """Load D2L + T2L adapters stacked (non-overlapping modules)."""
     print(f"Loading stacked adapters: D2L={d2l_id}, T2L={t2l_id}")
 
-    # Load T2L adapter first
-    model = load_adapter(base_model, t2l_id)
+    # Load D2L adapter first (targets down_proj)
+    model = PeftModel.from_pretrained(base_model, d2l_id, adapter_name="default")
 
-    # Add D2L adapter
-    model.load_adapter(d2l_id, adapter_name="d2l")
+    # Add T2L adapter (targets q_proj, v_proj — non-overlapping with D2L)
+    model.load_adapter(t2l_id, adapter_name="t2l_detector")
 
-    # Enable both adapters
-    model.set_adapter(["default", "d2l"])
+    # Both adapters active by default since they target non-overlapping modules
+    # No set_adapter() needed
     model.eval()
 
     return model
@@ -245,19 +283,19 @@ def compute_metrics(y_true, y_pred) -> dict[str, Any]:
     )
 
     precision = precision_score(
-        y_true_binary, y_pred_binary, pos_label=1, zero_division=0
+        y_true_binary, y_pred_binary, pos_label=1, zero_division=0.0
     )
-    recall = recall_score(y_true_binary, y_pred_binary, pos_label=1, zero_division=0)
-    f1 = f1_score(y_true_binary, y_pred_binary, pos_label=1, zero_division=0)
+    recall = recall_score(y_true_binary, y_pred_binary, pos_label=1, zero_division=0.0)
+    f1 = f1_score(y_true_binary, y_pred_binary, pos_label=1, zero_division=0.0)
 
     # No (negative) class metrics
     precision_neg = precision_score(
-        y_true_binary, y_pred_binary, pos_label=0, zero_division=0
+        y_true_binary, y_pred_binary, pos_label=0, zero_division=0.0
     )
     recall_neg = recall_score(
-        y_true_binary, y_pred_binary, pos_label=0, zero_division=0
+        y_true_binary, y_pred_binary, pos_label=0, zero_division=0.0
     )
-    f1_neg = f1_score(y_true_binary, y_pred_binary, pos_label=0, zero_division=0)
+    f1_neg = f1_score(y_true_binary, y_pred_binary, pos_label=0, zero_division=0.0)
 
     macro_f1 = (f1 + f1_neg) / 2
 
@@ -305,13 +343,13 @@ def evaluate_stage_0(model, tokenizer, dataset: Dataset, detector_name: str) -> 
 
 def evaluate_stage_1a(
     base_model, tokenizer, dataset: Dataset, detector_name: str
-) -> Optional[dict]:
-    """Stage 1a: T2L only (task adapter)."""
+) -> tuple[Optional[dict], object]:
+    """Stage 1a: T2L only (task adapter). Returns (result, clean_base_model)."""
     print(f"\n=== Stage 1a: T2L only ({detector_name}) ===")
     adapter_id = T2L_ADAPTERS[detector_name]
     if adapter_id is None:
         print(f"Warning: T2L adapter not available for {detector_name}")
-        return None
+        return None, base_model
 
     model = load_adapter(base_model, adapter_id)
     predictions = run_inference(model, tokenizer, dataset, detector_name)
@@ -320,20 +358,18 @@ def evaluate_stage_1a(
     metrics = compute_metrics(y_true, predictions)
     cm = compute_confusion_matrix(y_true, predictions)
 
-    del model
-    torch.cuda.empty_cache()
-
-    return {"predictions": predictions, "metrics": metrics, "confusion_matrix": cm}
+    clean = cleanup_adapter(model)
+    return {"predictions": predictions, "metrics": metrics, "confusion_matrix": cm}, clean
 
 
 def evaluate_stage_1b(
     base_model, tokenizer, dataset: Dataset, detector_name: str
-) -> Optional[dict]:
-    """Stage 1b: D2L only (methodology adapter)."""
+) -> tuple[Optional[dict], object]:
+    """Stage 1b: D2L only (methodology adapter). Returns (result, clean_base_model)."""
     print(f"\n=== Stage 1b: D2L only ({detector_name}) ===")
     if D2L_ADAPTER_ID is None:
         print("Warning: D2L adapter not available")
-        return None
+        return None, base_model
 
     model = load_adapter(base_model, D2L_ADAPTER_ID)
     predictions = run_inference(model, tokenizer, dataset, detector_name)
@@ -342,21 +378,19 @@ def evaluate_stage_1b(
     metrics = compute_metrics(y_true, predictions)
     cm = compute_confusion_matrix(y_true, predictions)
 
-    del model
-    torch.cuda.empty_cache()
-
-    return {"predictions": predictions, "metrics": metrics, "confusion_matrix": cm}
+    clean = cleanup_adapter(model)
+    return {"predictions": predictions, "metrics": metrics, "confusion_matrix": cm}, clean
 
 
 def evaluate_stage_1c(
     base_model, tokenizer, dataset: Dataset, detector_name: str
-) -> Optional[dict]:
-    """Stage 1c: D2L + T2L stacked."""
+) -> tuple[Optional[dict], object]:
+    """Stage 1c: D2L + T2L stacked. Returns (result, clean_base_model)."""
     print(f"\n=== Stage 1c: D2L + T2L ({detector_name}) ===")
     t2l_id = T2L_ADAPTERS[detector_name]
     if D2L_ADAPTER_ID is None or t2l_id is None:
         print(f"Warning: Stacked adapters not available for {detector_name}")
-        return None
+        return None, base_model
 
     model = load_stacked_adapters(base_model, D2L_ADAPTER_ID, t2l_id)
     predictions = run_inference(model, tokenizer, dataset, detector_name)
@@ -365,21 +399,19 @@ def evaluate_stage_1c(
     metrics = compute_metrics(y_true, predictions)
     cm = compute_confusion_matrix(y_true, predictions)
 
-    del model
-    torch.cuda.empty_cache()
-
-    return {"predictions": predictions, "metrics": metrics, "confusion_matrix": cm}
+    clean = cleanup_adapter(model)
+    return {"predictions": predictions, "metrics": metrics, "confusion_matrix": cm}, clean
 
 
 def evaluate_stage_2(
     base_model, tokenizer, dataset: Dataset, detector_name: str, n_examples: str
-) -> Optional[dict]:
-    """Stage 2: QLoRA with n examples (50, 100, 200, full)."""
+) -> tuple[Optional[dict], object]:
+    """Stage 2: QLoRA with n examples. Returns (result, clean_base_model)."""
     print(f"\n=== Stage 2: QLoRA-{n_examples} ({detector_name}) ===")
     adapter_id = QLORA_ADAPTERS[detector_name][n_examples]
     if adapter_id is None:
         print(f"Warning: QLoRA-{n_examples} adapter not available for {detector_name}")
-        return None
+        return None, base_model
 
     model = load_adapter(base_model, adapter_id)
     predictions = run_inference(model, tokenizer, dataset, detector_name)
@@ -388,10 +420,8 @@ def evaluate_stage_2(
     metrics = compute_metrics(y_true, predictions)
     cm = compute_confusion_matrix(y_true, predictions)
 
-    del model
-    torch.cuda.empty_cache()
-
-    return {"predictions": predictions, "metrics": metrics, "confusion_matrix": cm}
+    clean = cleanup_adapter(model)
+    return {"predictions": predictions, "metrics": metrics, "confusion_matrix": cm}, clean
 
 
 # =============================================================================
@@ -597,46 +627,46 @@ def main():
 
         results[detector] = {}
 
-        # Stage 0: Zero-shot
-        result = evaluate_stage_0(base_model, tokenizer, dataset, detector)
-        results[detector]["stage_0"] = result
+        # Stage 0: Zero-shot (no adapter loading, base_model unchanged)
+        stage_result = evaluate_stage_0(base_model, tokenizer, dataset, detector)
+        results[detector]["stage_0"] = stage_result
         save_confusion_matrix_individual(
-            result["confusion_matrix"], "zero_shot", detector, OUTPUT_DIR
+            stage_result["confusion_matrix"], "zero_shot", detector, OUTPUT_DIR
         )
 
         # Stage 1a: T2L only
-        result = evaluate_stage_1a(base_model, tokenizer, dataset, detector)
-        if result:
-            results[detector]["stage_1a"] = result
+        stage_result, base_model = evaluate_stage_1a(base_model, tokenizer, dataset, detector)
+        if stage_result:
+            results[detector]["stage_1a"] = stage_result
             save_confusion_matrix_individual(
-                result["confusion_matrix"], "t2l_only", detector, OUTPUT_DIR
+                stage_result["confusion_matrix"], "t2l_only", detector, OUTPUT_DIR
             )
 
         # Stage 1b: D2L only
-        result = evaluate_stage_1b(base_model, tokenizer, dataset, detector)
-        if result:
-            results[detector]["stage_1b"] = result
+        stage_result, base_model = evaluate_stage_1b(base_model, tokenizer, dataset, detector)
+        if stage_result:
+            results[detector]["stage_1b"] = stage_result
             save_confusion_matrix_individual(
-                result["confusion_matrix"], "d2l_only", detector, OUTPUT_DIR
+                stage_result["confusion_matrix"], "d2l_only", detector, OUTPUT_DIR
             )
 
         # Stage 1c: D2L + T2L
-        result = evaluate_stage_1c(base_model, tokenizer, dataset, detector)
-        if result:
-            results[detector]["stage_1c"] = result
+        stage_result, base_model = evaluate_stage_1c(base_model, tokenizer, dataset, detector)
+        if stage_result:
+            results[detector]["stage_1c"] = stage_result
             save_confusion_matrix_individual(
-                result["confusion_matrix"], "d2l_t2l", detector, OUTPUT_DIR
+                stage_result["confusion_matrix"], "d2l_t2l", detector, OUTPUT_DIR
             )
 
         # Stage 2: QLoRA variants
         for n_examples in ["50", "100", "200", "full"]:
-            result = evaluate_stage_2(
+            stage_result, base_model = evaluate_stage_2(
                 base_model, tokenizer, dataset, detector, n_examples
             )
-            if result:
-                results[detector][f"stage_2_{n_examples}"] = result
+            if stage_result:
+                results[detector][f"stage_2_{n_examples}"] = stage_result
                 save_confusion_matrix_individual(
-                    result["confusion_matrix"],
+                    stage_result["confusion_matrix"],
                     f"qlora_{n_examples}",
                     detector,
                     OUTPUT_DIR,

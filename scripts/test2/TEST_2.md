@@ -175,27 +175,29 @@ For QLoRA at 50 examples: reduce effective batch size to ensure sufficient train
 
 ## Implementation Phases
 
-### Phase 1: Data preparation
-1. Write `prepare_dataset_v2.py` — interview-level splitting, per-node-type binary labels, drop v1
+### Phase 1: Data preparation ✓
+1. Write `prepare_dataset_v3.py` — interview-level splitting, per-node-type binary labels, drop v1
 2. Generate 3 JSONL datasets (one per detector) with same splits
-3. Push to HuggingFace Hub
+3. Push to HuggingFace Hub (`michaelarutyunov/jtbd-binary-{job-trigger,solution-approach,pain-point}`)
 
-### Phase 2: D2L adapter
-1. Convert JTBD methodology YAML to prose document
-2. Run D2L hypernetwork on Mistral-7B with methodology document
-3. Save as standard PEFT adapter
-4. Validate: probe model with JTBD knowledge questions to confirm internalization
+### Phase 2: D2L adapter ✓
+1. Convert JTBD methodology YAML to prose document → uploaded to Hub
+2. Run D2L hypernetwork on Mistral-7B with methodology document (HF Jobs, A100)
+3. Saved as standard PEFT adapter → `michaelarutyunov/jtbd-d2l-mistral7b-methodology`
 
-### Phase 3: T2L adapters (×3)
-1. Run T2L hypernetwork with each task description
-2. Save 3 PEFT adapters (one per detector)
+### Phase 3: T2L adapters (×3) ✓
+1. Run T2L hypernetwork with each task description (HF Jobs, A100)
+2. Saved 3 PEFT adapters → `michaelarutyunov/jtbd-t2l-{jobtrigger,solutionapproach,painpoint}`
 
-### Phase 4: LoRA stacking
-1. Write adapter extraction + combination script
-2. Test loading D2L + T2L adapters simultaneously
-3. Validate inference works correctly with stacked adapters
+### Phase 4: LoRA stacking ✓
+1. Validated D2L + T2L adapters load simultaneously (non-overlapping modules)
+2. Inference works correctly with stacked adapters (6/9 test cases passed, threshold 5/9)
 
-### Phase 5: Evaluation
+### Phase 5a: QLoRA training (in progress)
+1. Training 12 adapters: 3 detectors × 4 sizes (50, 100, 200, full)
+2. Push to Hub as `michaelarutyunov/jtbd-qlora-{detector}-{size}`
+
+### Phase 5b: Evaluation (pending)
 1. Run all conditions (0, 1a, 1b, 1c, 2a-2d) × 3 detectors = 24 evaluation runs
 2. Collect metrics, generate plots
 3. Write up results
@@ -215,400 +217,110 @@ For QLoRA at 50 examples: reduce effective batch size to ensure sufficient train
 
 ## How to Run Test 2
 
-This section provides step-by-step instructions to execute all phases of Test 2.
-
 ### Prerequisites
 
-1. **HuggingFace token** with write access
-   ```bash
-   export HF_TOKEN=your_token_here
-   # Or login once:
-   huggingface-cli login
-   ```
-
-2. **Required Python packages** (installed via `uv` automatically from PEP 723 headers):
-   - T2L/D2L: `torch`, `transformers`, `peft`, `text-to-lora`
-   - Data prep: `datasets`, `pandas`
-   - Evaluation: `scikit-learn`, `matplotlib`, `seaborn`
-
-3. **Compute requirements**:
-   - **Local**: CPU for data prep, A100 40GB for adapter generation/training
-   - **HuggingFace Jobs**: A100 40GB (`a100-large` flavor)
-
-4. **Interview-system-v2 access**: The data pipeline requires access to `interview-system-v2/synthetic_interviews`
+1. **HuggingFace token** with write access: `export HF_TOKEN=your_token_here`
+2. **Interview-system-v2 access**: Data pipeline requires `interview-system-v2/synthetic_interviews/`
+3. **Python 3.10+** and [`uv`](https://github.com/astral-sh/uv) installed
 
 ---
 
-### Phase 1: Data Preparation (Local, ~5 min)
-
-Generate binary classification datasets for all 3 detectors.
+### Phase 1: Data Preparation (local, ~5 min)
 
 ```bash
-cd /home/mikhailarutyunov/projects/text-to-lora-demo
+# Generate JSONL datasets for all 3 detectors
 uv run scripts/test2/prepare_dataset_v3.py
-```
 
-**Expected output**:
-```
-Loaded 31 interviews
-Total utterances: 362
-Interview-level split: 22 train / 4 val / 5 test
-
-Generated datasets:
-- data/test2/job_trigger_train.jsonl (80 utterances)
-- data/test2/job_trigger_val.jsonl (15 utterances)
-- data/test2/job_trigger_test.jsonl (60 utterances)
-- data/test2/solution_approach_{train,val,test}.jsonl
-- data/test2/pain_point_{train,val,test}.jsonl
-```
-
-**Push to Hub** (makes datasets accessible for HF Jobs):
-```bash
-uv run scripts/test2/push_datasets_to_hub.py
-```
-
----
-
-### Phase 2: D2L Adapter Generation (A100 40GB, ~30 min)
-
-Generate a domain knowledge adapter from the JTBD methodology document.
-
-#### Step 2a: Upload methodology document to HuggingFace
-
-```bash
+# Upload methodology doc to HF Hub (creates repo if needed)
 uv run scripts/test2/upload_methodology_doc.py
+
+# Push the 3 binary detector datasets to HF Hub
+for det in job_trigger solution_approach pain_point; do
+    uv run scripts/test2/push_datasets_to_hub.py \
+        --repo michaelarutyunov/jtbd-binary-${det//_/-} \
+        --detector $det
+done
 ```
 
-This uploads `interview-system-v2/config/methodologies/jobs_to_be_done_v2.yaml` as a readable prose document to HF Hub.
+---
 
-**Expected output**: Hub repository URL (e.g., `https://huggingface.co/datasets/michaelarutyunov/jtbd-methodology-v2`)
+### Phases 2–5: Run on HF Jobs (automated)
 
-#### Step 2b: Run D2L hypernetwork on HF Jobs
+The orchestrator submits all HF Jobs in the correct order, runs phases 2 and 3 in parallel, and polls for completion before advancing.
 
 ```bash
-hf jobs uv run \
-    --flavor a100-large \
-    --timeout 1h \
-    --secrets HF_TOKEN \
-    scripts/test2/stage_d2l_hf_jobs.py
+# Recommended: L40S (48GB VRAM, ~$11 total)
+python3 scripts/test2/submit_experiment.py --flavor l40sx1
+
+# Alternative: A100 (80GB VRAM, ~$15 total)
+python3 scripts/test2/submit_experiment.py --flavor a100-large
+
+# Preview commands and cost without submitting
+python3 scripts/test2/submit_experiment.py --dry-run --flavor l40sx1
 ```
 
-**What this does**:
-1. Downloads the methodology document from Hub
-2. Runs Doc-to-LoRA hypernetwork on Mistral-7B
-3. Saves adapter as PEFT format to Hub: `michaelarutyunov/jtbd-d2l-mistral7b`
+**Available flavors** (single-GPU options suitable for Mistral-7B):
 
-**Expected output**:
-```
-Doc-to-LoRA adapter saved to: michaelarutyunov/jtbd-d2l-mistral7b
-```
+| Flavor | VRAM | Price/hr |
+|--------|------|----------|
+| `l40sx1` | 48GB | $1.80 |
+| `a100-large` | 80GB | $2.50 |
 
----
-
-### Phase 3: T2L Adapter Generation (A100 40GB, ~30 min)
-
-Generate task-specific adapters from short text descriptions (one per detector).
-
+**Resume from a specific phase** (if a job fails and needs resubmitting):
 ```bash
-hf jobs uv run \
-    --flavor a100-large \
-    --timeout 1h \
-    --secrets HF_TOKEN \
-    scripts/test2/stage_t2l_hf_jobs.py
+python3 scripts/test2/submit_experiment.py --flavor l40sx1 --skip-to qlora
+python3 scripts/test2/submit_experiment.py --flavor l40sx1 --only evaluate
 ```
 
-**What this does**:
-1. For each detector (job_trigger, solution_approach, pain_point):
-   - Runs Text-to-LoRA hypernetwork on Mistral-7B
-   - Uses the task description as the conditioning prompt
-   - Saves adapter as PEFT format to Hub
-
-**Expected output**:
-```
-T2L adapters saved:
-- michaelarutyunov/jtbd-t2l-job-trigger-mistral7b
-- michaelarutyunov/jtbd-t2l-solution-approach-mistral7b
-- michaelarutyunov/jtbd-t2l-pain-point-mistral7b
-```
+**Total runtime**: ~4–5 hours wall-clock (phases 2+3 run in parallel)
 
 ---
 
-### Phase 4: LoRA Stacking Validation (A100 40GB, ~15 min)
+### Phase 6: Writeup (local, after experiment completes)
 
-Verify that D2L and T2L adapters can be loaded simultaneously without interference.
-
-```bash
-hf jobs uv run \
-    --flavor a10g-small \
-    --timeout 30m \
-    --secrets HF_TOKEN \
-    scripts/test2/validate_lora_stacking.py
-```
-
-**What this does**:
-1. Loads base Mistral-7B model
-2. For each detector, tests loading D2L + T2L stacked adapters
-3. Runs inference on 9 generic test utterances
-4. Validates that adapters produce expected outputs
-
-**Expected output**:
-```
-=== Testing LoRA Stacking ===
-job_trigger detector:
-  Zero-shot: 2/9 correct
-  D2L + T2L stacked: 7/9 correct ✓
-
-solution_approach detector:
-  Zero-shot: 3/9 correct
-  D2L + T2L stacked: 8/9 correct ✓
-
-pain_point detector:
-  Zero-shot: 6/9 correct
-  D2L + T2L stacked: 8/9 correct ✓
-
-All detectors passed stacking validation!
-```
-
-**If this fails**: Check PEFT version compatibility and adapter target modules. D2L should target `down_proj`, T2L should target `q_proj, v_proj` (non-overlapping).
-
----
-
-### Phase 5: Full Evaluation (A100 40GB, ~2-3 hours)
-
-Run all 24 experimental conditions and generate metrics/plots.
-
-```bash
-hf jobs uv run \
-    --flavor a100-large \
-    --timeout 4h \
-    --secrets HF_TOKEN \
-    scripts/test2/evaluate_conditions.py
-```
-
-**What this does**:
-1. Evaluates all 24 conditions (0, 1a, 1b, 1c, 2a-2d × 3 detectors)
-2. Computes macro F1, precision, recall for each condition
-3. Generates 3 visualization plots
-4. Saves metrics as JSON and summary CSV
-
-**Expected outputs** (saved to `outputs/test2/evaluation/`):
-```
-metrics.json                    # All raw metrics and predictions
-summary.csv                     # Human-readable summary table
-learning_curve.png              # Plot 1: Learning curves per detector
-d2l_knowledge_transfer.png      # Plot 2: D2L vs zero-shot comparison
-confusion_matrices.png          # Plot 3: Confusion matrix grid
-{detector}_{stage}_confusion_matrix.png  # Individual confusion matrices
-```
-
-**Sample terminal output**:
-```
-============================================================
-Test 2 Phase 5: Full Evaluation Pipeline
-============================================================
-Loading base model: mistralai/Mistral-7B-Instruct-v0.2
-
-============================================================
-Detector: job_trigger
-============================================================
-Test set size: 60 utterances
-
-=== Stage 0: Zero-shot (job_trigger) ===
-=== Stage 1a: T2L only (job_trigger) ===
-...
-=== Stage 2: QLoRA-full (job_trigger) ===
-
-============================================================
-Detector: solution_approach
-============================================================
-...
-
-============================================================
-SUMMARY
-============================================================
-
-Job_Trigger:
-Stage           Macro F1   Accuracy
------------------------------------
-Zero            0.450      0.550
-T2L             0.520      0.620
-D2L             0.580      0.640
-D2L+T2L         0.650      0.720
-QLoRA-50        0.680      0.740
-QLoRA-100       0.710      0.780
-QLoRA-200       0.740      0.810
-QLoRA-Full      0.770      0.850
-...
-```
-
----
-
-### Phase 6: Writeup (Local, ~1-2 hours)
-
-Document results and create shareable content.
-
-#### 6a. Update EVAL.md
-
-Add results section to `/home/mikhailarutyunov/projects/text-to-lora-demo/EVAL.md`:
-
-```markdown
----
-## Test 2: Binary Detectors with D2L + T2L
-
-**Date**: March 2026
-**Approach**: Parallel binary detectors with Doc-to-LoRA + Text-to-LoRA
-
-### Executive Summary
-
-| Detector | Best Method | Macro F1 | Zero-shot F1 | Improvement |
-|----------|-------------|----------|--------------|-------------|
-| job_trigger | D2L+T2L | 0.65 | 0.45 | +44% |
-| solution_approach | QLoRA-100 | 0.72 | 0.50 | +44% |
-| pain_point | D2L+T2L | 0.78 | 0.65 | +20% |
-
-**Key findings**:
-- D2L knowledge transfer improves JTBD-specific concepts (job_trigger)
-- T2L effectively captures task structure
-- D2L+T2L stacking matches QLoRA-50 performance without training data
-...
-```
-
-#### 6b. Update README
-
-Add Test 2 section to project README:
-
-```markdown
-### Test 2: Binary Detectors (2026)
-
-Explores parallel binary detection architecture with domain knowledge internalization via Doc-to-LoRA.
-
-**Key results**: D2L+T2L stacked adapters achieve 44% improvement over zero-shot on JTBD-specific concepts without task-specific training data.
-
-**Links**: [Full methodology](scripts/test2/TEST_2.md) | [Implementation log](scripts/test2/implementation_log.md)
-```
-
-#### 6c. Draft LinkedIn post
-
-Create narrative highlighting:
-1. **Problem**: Expensive LLM calls for JTBD extraction
-2. **Solution**: Parallel binary detectors with LoRA adapters
-3. **Innovation**: Domain knowledge internalization via Doc-to-LoRA
-4. **Results**: 44% improvement without training data, 10x cost reduction
+1. Update `EVAL.md` with results from `outputs/test2/evaluation/summary.csv`
+2. Update `README.md` with Test 2 narrative
+3. Draft LinkedIn post
 
 ---
 
 ## Troubleshooting
 
-### Issue: "Module not found" errors
+### "command not found: python"
+Use `python3` instead of `python` on this machine.
 
-**Cause**: PEP 723 dependencies not installed
+### HF Jobs flavor name not recognised
+Run `hf jobs hardware` to see the current list of valid flavor names.
 
-**Fix**: Ensure you're using `uv run` (not `python`):
+### "CUDA out of memory" during evaluation
+Reduce batch size by editing `evaluate_conditions.py`:
+```python
+# In run_inference(), change default:
+def run_inference(..., batch_size: int = 2):  # was 4
+```
+
+### Confusion matrix has all zeros
+Model is predicting only one class. Check `metrics.json`:
 ```bash
-uv run scripts/test2/prepare_dataset_v3.py  # ✓
-python scripts/test2/prepare_dataset_v3.py   # ✗
+cat outputs/test2/evaluation/metrics.json | jq '.job_trigger.stage_0.predictions[:10]'
 ```
+If all "unknown": prompt format mismatch — verify `format_prompt()` is consistent across all scripts.
 
-### Issue: HF Jobs fails with "quota exceeded"
+### D2L: `KeyError: 'peft_type'` or "Found missing adapter keys"
+- Pin `peft>=0.14.0` (older versions can't auto-detect adapter format).
+- PEFT key format must be `base_model.model.model.layers.{i}.mlp.down_proj.lora_{A|B}.default.weight` — note the double `.model` prefix and `.default` adapter name.
 
-**Cause**: No available A100 GPUs in your HF account
+### T2L: `ModuleNotFoundError` for hyper_llm_modulator or its transitive deps
+The T2L repo uses eager top-level imports that pull in `torchmetrics`, `inflect`, `rouge-score`, `wandb` even for generation-only paths. These are installed at runtime in `stage_t2l_hf_jobs.py`. If a new import surfaces, add it to the `uv pip install` call in `clone_t2l_repo()`.
 
-**Fix**:
-1. Check your quota: https://huggingface.co/settings/billing
-2. Try smaller flavor: `--flavor a10g-small` (may OOM with Mistral-7B)
-3. Run locally if you have A100/A10G: Remove `hf jobs uv run` prefix
+### T2L: `FlashAttention2 has been toggled on`
+T2L does **not** require flash-attn (unlike D2L). The script patches `use_flash_attn=True` → `False` in the cloned repo's `model_loading.py`. If this fails, the patch target may have changed upstream.
 
-### Issue: "CUDA out of memory" during evaluation
+### QLoRA: TRL API errors (`max_seq_length`, `tokenizer`)
+TRL ≥0.12 renamed parameters: `max_seq_length` → `max_length` in `SFTConfig`, `tokenizer` → `processing_class` in `SFTTrainer`. These are already fixed in the current scripts.
 
-**Cause**: Batch size too large for GPU
-
-**Fix**: Reduce batch size in `evaluate_conditions.py`:
-```python
-# In main():
-result = evaluate_stage_0(base_model, tokenizer, dataset, detector_name)
-# Change to:
-result = evaluate_stage_0(base_model, tokenizer, dataset, detector_name, batch_size=2)
-```
-
-Or add this near the top of the file:
-```python
-# Change default batch size
-DEFAULT_BATCH_SIZE = 2  # Instead of 4
-```
-
-### Issue: "Adapter not found" during evaluation
-
-**Cause**: Adapter IDs in `evaluate_conditions.py` are placeholders
-
-**Fix**: Update the adapter ID constants after Phases 2-3 complete:
-```python
-D2L_ADAPTER_ID = "michaelarutyunov/jtbd-d2l-mistral7b"  # Update this
-T2L_ADAPTERS = {
-    "job_trigger": "michaelarutyunov/jtbd-t2l-job-trigger-mistral7b",  # Update these
-    ...
-}
-```
-
-### Issue: LoRA stacking produces wrong predictions
-
-**Cause**: Adapters targeting overlapping modules causing interference
-
-**Fix**: Verify target modules are non-overlapping:
-```python
-# T2L should target: q_proj, v_proj
-# D2L should target: down_proj
-
-# Check in adapter config:
-# cat ~/.cache/huggingface/hub/.../adapter_config.json
-# "target_modules": ["q_proj", "v_proj"]  # T2L
-# "target_modules": ["down_proj"]            # D2L
-```
-
-If overlap exists, re-train one adapter with correct targets.
-
-### Issue: Confusion matrix has all zeros
-
-**Cause**: Model predictions are all "unknown" or all one class
-
-**Diagnosis**: Check predictions in `metrics.json`:
-```bash
-cat outputs/test2/evaluation/metrics.json | jq '.job_trigger.stage_0.predictions' | head -20
-```
-
-**Fix**:
-- If all "unknown": Prompt format mismatch, check `format_prompt()` matches training
-- If all "yes" or all "no": Class imbalance, use balanced accuracy or weighted loss
-- If random predictions: Adapter not loaded correctly, verify `model.eval()` was called
-
----
-
-## Quick Reference
-
-**Run all phases sequentially**:
-```bash
-# Phase 1: Data (local)
-uv run scripts/test2/prepare_dataset_v3.py
-uv run scripts/test2/push_datasets_to_hub.py
-
-# Phase 2: D2L (HF Jobs)
-uv run scripts/test2/upload_methodology_doc.py
-hf jobs uv run --flavor a100-large --timeout 1h --secrets HF_TOKEN scripts/test2/stage_d2l_hf_jobs.py
-
-# Phase 3: T2L (HF Jobs)
-hf jobs uv run --flavor a100-large --timeout 1h --secrets HF_TOKEN scripts/test2/stage_t2l_hf_jobs.py
-
-# Phase 4: Validate stacking (HF Jobs)
-hf jobs uv run --flavor a10g-small --timeout 30m --secrets HF_TOKEN scripts/test2/validate_lora_stacking.py
-
-# Phase 5: Evaluate (HF Jobs)
-hf jobs uv run --flavor a100-large --timeout 4h --secrets HF_TOKEN scripts/test2/evaluate_conditions.py
-
-# Phase 6: Writeup (local)
-# Manually update EVAL.md, README.md, draft LinkedIn post
-```
-
-**Total compute time**: ~4-5 hours on A100 40GB
-**Total cost**: ~$20-30 on HuggingFace Jobs (as of March 2026)
+### Detailed debug log
+See `scripts/test2/test_2_debug_notes.md` for the full submission-by-submission debug history across all phases.
 
 ---
 

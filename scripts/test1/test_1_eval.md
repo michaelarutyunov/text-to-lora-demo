@@ -317,7 +317,7 @@ Then update the comparison table to include Stage 2 metrics.
 
 **Action Plan**:
 
-1. **Compute class weights** (add to `scripts/train_qlora_hf_jobs.py`):
+1. **Compute class weights** (add to `scripts/test1/train_qlora_hf_jobs.py`):
 ```python
 import numpy as np
 
@@ -338,7 +338,7 @@ hf jobs uv run \
     --flavor a10g-large \
     --timeout 2h \
     --secrets HF_TOKEN \
-    scripts/train_qlora_hf_jobs.py
+    scripts/test1/train_qlora_hf_jobs.py
 ```
 
 3. **Evaluate improvement**:
@@ -347,7 +347,7 @@ hf jobs uv run \
     --flavor a10g-small \
     --timeout 30m \
     --secrets HF_TOKEN \
-    scripts/evaluate_qlora_hf_jobs.py
+    scripts/test1/evaluate_qlora_hf_jobs.py
 ```
 
 **Expected outcome**:
@@ -401,7 +401,7 @@ hf jobs uv run \
 
 **Why**: Current r=8 is modest. Larger rank = more adaptable parameters.
 
-**Action**: Modify `scripts/train_qlora_hf_jobs.py`:
+**Action**: Modify `scripts/test1/train_qlora_hf_jobs.py`:
 ```python
 LORA_R = 16  # or 32
 LORA_ALPHA = 32  # 2x rank (standard practice)
