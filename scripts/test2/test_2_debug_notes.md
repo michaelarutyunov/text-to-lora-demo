@@ -373,7 +373,7 @@ os.environ["HF_HUB_TRUST_REMOTE_CODE"] = "1"
 # Part 5: Evaluation
 
 **Script**: `evaluate_conditions.py`
-**Total submissions**: 1 (so far) | **Status**: IN PROGRESS
+**Total submissions**: 4 | **Status**: RESOLVED — full evaluation complete
 
 ## Evaluate Issue 1: Tokenizer missing pad token
 
@@ -382,6 +382,28 @@ os.environ["HF_HUB_TRUST_REMOTE_CODE"] = "1"
 **Cause**: `AutoTokenizer.from_pretrained()` for Mistral doesn't set a pad token by default. The training script sets it, but the evaluate script didn't.
 
 **Fix**: Added `tokenizer.pad_token = tokenizer.eos_token` and `tokenizer.padding_side = "left"` after loading.
+
+---
+
+## Evaluate Issue 2: QLoRA adapter IDs not populated
+
+**Symptom**: All QLoRA stages show "Warning: QLoRA-{size} adapter not available for {detector}"
+
+**Cause**: The QLoRA training job crashed on `update_evaluate_script()` (FileNotFoundError), so the `QLORA_ADAPTERS` dict in `evaluate_conditions.py` still had all `None` values.
+
+**Fix**: Manually filled in all 12 Hub IDs following the pattern `michaelarutyunov/jtbd-qlora-{detector}-{size}`.
+
+---
+
+## Evaluate Issue 3: D2L stacked adapter_name mismatch
+
+**Symptom**: D2L+T2L results identical to T2L-only (D2L weights loading as zeros in stacked mode)
+
+**Cause**: `load_stacked_adapters()` used `adapter_name="d2l_jtbd"` when loading D2L, which makes PEFT expect keys like `.lora_A.d2l_jtbd.weight`. The saved D2L adapter uses `.lora_A.default.weight`.
+
+**Fix**: Changed to `adapter_name="default"` to match the saved key names.
+
+**Note**: D2L-only (Stage 1b) was unaffected — it uses `PeftModel.from_pretrained()` without `adapter_name`, which defaults to `"default"`. However, D2L still shows no effect on classification (identical to zero-shot). This appears to be a genuine experimental result: D2L's `down_proj` modifications encode factual knowledge but don't influence binary yes/no classification decisions.
 
 ---
 
@@ -485,3 +507,5 @@ os.environ["HF_HUB_TRUST_REMOTE_CODE"] = "1"
 |---|-------|-------------|--------|
 | 1 | Tokenizer missing pad token | Added `pad_token = eos_token` + `padding_side = "left"` | Fixed — QLoRA adapters skipped |
 | 2 | QLoRA adapter IDs all `None` | Filled in Hub IDs manually | Fixed |
+| 3 | D2L stacked adapter_name mismatch | Changed `adapter_name="d2l_jtbd"` → `"default"` | Fixed |
+| 4 | All fixes applied | — | **Success** — full evaluation complete |

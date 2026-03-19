@@ -186,13 +186,16 @@ def extract_and_save_lora_weights(model, methodology_text: str, output_dir: str,
         lora_B = loras[target_module]["B"][0, layer_idx]  # [r, d_out]
 
         # PEFT naming convention for Mistral-7B
-        # Format: base_model.model.model.layers.{i}.mlp.{module}.lora_{A|B}.default.weight
+        # Format: base_model.model.model.layers.{i}.mlp.{module}.lora_{A|B}.weight
+        # NOTE: Do NOT embed adapter name (e.g. ".default.") in key paths —
+        # PEFT >=0.14 strips adapter names during loading, causing silent key mismatch
+        # NOTE: D2L outputs lora_B as [r, d_out] but PEFT expects [d_out, r] — transpose
         peft_state_dict[
-            f"base_model.model.model.layers.{layer_idx}.mlp.down_proj.lora_A.default.weight"
+            f"base_model.model.model.layers.{layer_idx}.mlp.down_proj.lora_A.weight"
         ] = lora_A.cpu()
         peft_state_dict[
-            f"base_model.model.model.layers.{layer_idx}.mlp.down_proj.lora_B.default.weight"
-        ] = lora_B.cpu()
+            f"base_model.model.model.layers.{layer_idx}.mlp.down_proj.lora_B.weight"
+        ] = lora_B.t().contiguous().cpu()
 
     print(f"  - Extracted {len(peft_state_dict)} weight tensors")
 

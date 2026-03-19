@@ -4,8 +4,10 @@
 # dependencies = [
 #     "torch>=2.0.0",
 #     "transformers>=4.40.0",
-#     "peft>=0.10.0",
+#     "peft>=0.14.0",
 #     "datasets>=2.18.0",
+#     "safetensors",
+#     "huggingface-hub>=0.20.0",
 #     "numpy>=1.24.0",
 #     "scikit-learn>=1.3.0",
 #     "matplotlib>=3.7.0",
@@ -186,6 +188,65 @@ def load_adapter(model, adapter_id: str):
     return PeftModel.from_pretrained(model, adapter_id, is_trainable=False)
 
 
+def load_d2l_adapter(model, adapter_id: str, adapter_name: str = "default"):
+    """Load D2L adapter with key remapping to fix .default. key-path mismatch.
+
+    The D2L generation script saved keys as:
+        ...lora_A.default.weight  (adapter name embedded)
+    But PEFT >=0.14 expects:
+        ...lora_A.weight          (no adapter name in key path)
+
+    This function downloads the safetensors, strips '.default.' from keys,
+    saves a corrected copy, and loads via PeftModel.from_pretrained.
+    """
+    import re
+    import tempfile
+
+    from huggingface_hub import hf_hub_download
+    from safetensors.torch import load_file, save_file
+
+    print(f"Loading D2L adapter with key remapping: {adapter_id}")
+
+    # Download the adapter files
+    config_path = hf_hub_download(
+        repo_id=adapter_id, filename="adapter_config.json", token=HF_TOKEN
+    )
+    weights_path = hf_hub_download(
+        repo_id=adapter_id, filename="adapter_model.safetensors", token=HF_TOKEN
+    )
+
+    # Load and remap keys
+    weights = load_file(weights_path)
+    remapped = {}
+    n_remapped = 0
+    n_transposed = 0
+    for key, tensor in weights.items():
+        # Strip embedded adapter name: .lora_A.default.weight -> .lora_A.weight
+        new_key = re.sub(r"\.lora_([AB])\.default\.weight", r".lora_\1.weight", key)
+        if new_key != key:
+            n_remapped += 1
+        # D2L saves lora_B as [r, d_out] but PEFT expects [d_out, r] — transpose
+        if ".lora_B." in new_key and tensor.dim() == 2 and tensor.shape[0] < tensor.shape[1]:
+            tensor = tensor.t().contiguous()
+            n_transposed += 1
+        remapped[new_key] = tensor
+
+    print(f"  Remapped {n_remapped}/{len(weights)} keys, transposed {n_transposed} lora_B matrices")
+
+    # Save corrected adapter to temp dir
+    with tempfile.TemporaryDirectory() as tmpdir:
+        import shutil
+
+        shutil.copy2(config_path, f"{tmpdir}/adapter_config.json")
+        save_file(remapped, f"{tmpdir}/adapter_model.safetensors")
+
+        peft_model = PeftModel.from_pretrained(
+            model, tmpdir, adapter_name=adapter_name, is_trainable=False
+        )
+
+    return peft_model
+
+
 def cleanup_adapter(model) -> object:
     """Unload adapter and return clean base model.
 
@@ -201,19 +262,55 @@ def cleanup_adapter(model) -> object:
 
 
 def load_stacked_adapters(base_model, d2l_id: str, t2l_id: str):
-    """Load D2L + T2L adapters stacked (non-overlapping modules)."""
-    print(f"Loading stacked adapters: D2L={d2l_id}, T2L={t2l_id}")
+    """Load D2L + T2L adapters stacked (non-overlapping modules).
 
-    # Load D2L adapter first (targets down_proj)
-    model = PeftModel.from_pretrained(base_model, d2l_id, adapter_name="default")
+    Load order matters: T2L goes first as "default" (always active),
+    D2L loaded second with key remapping. This ensures T2L predictions
+    are never blocked by adapter activation issues.
+    """
+    import re
+    import tempfile
 
-    # Add T2L adapter (targets q_proj, v_proj — non-overlapping with D2L)
-    model.load_adapter(t2l_id, adapter_name="t2l_detector")
+    from huggingface_hub import hf_hub_download
+    from safetensors.torch import load_file, save_file
 
-    # Both adapters active by default since they target non-overlapping modules
-    # No set_adapter() needed
+    print(f"Loading stacked adapters: T2L={t2l_id} (default), D2L={d2l_id} (secondary)")
+
+    # T2L first as "default" — it's the task-specific adapter that drives predictions
+    model = PeftModel.from_pretrained(base_model, t2l_id, adapter_name="default")
+
+    # D2L second — download, rekey, load from temp dir
+    config_path = hf_hub_download(
+        repo_id=d2l_id, filename="adapter_config.json", token=HF_TOKEN
+    )
+    weights_path = hf_hub_download(
+        repo_id=d2l_id, filename="adapter_model.safetensors", token=HF_TOKEN
+    )
+    weights = load_file(weights_path)
+    remapped = {}
+    for k, v in weights.items():
+        new_key = re.sub(r"\.lora_([AB])\.default\.weight", r".lora_\1.weight", k)
+        # D2L saves lora_B as [r, d_out] but PEFT expects [d_out, r] — transpose
+        if ".lora_B." in new_key and v.dim() == 2 and v.shape[0] < v.shape[1]:
+            v = v.t().contiguous()
+        remapped[new_key] = v
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        import shutil
+
+        shutil.copy2(config_path, f"{tmpdir}/adapter_config.json")
+        save_file(remapped, f"{tmpdir}/adapter_model.safetensors")
+        model.load_adapter(tmpdir, adapter_name="d2l")
+
+    # Activate both adapters
+    try:
+        model.set_adapter(["default", "d2l"])
+        print(f"  Active adapters: {model.active_adapters}")
+    except (TypeError, ValueError) as e:
+        # PEFT version may not support list activation
+        print(f"  Warning: multi-adapter activation failed ({e}), only 'default' (T2L) active")
+
     model.eval()
-
     return model
 
 
@@ -371,7 +468,7 @@ def evaluate_stage_1b(
         print("Warning: D2L adapter not available")
         return None, base_model
 
-    model = load_adapter(base_model, D2L_ADAPTER_ID)
+    model = load_d2l_adapter(base_model, D2L_ADAPTER_ID)
     predictions = run_inference(model, tokenizer, dataset, detector_name)
     y_true = dataset["label"]
 
@@ -739,9 +836,41 @@ def main():
     summary_df.to_csv(summary_path, index=False)
     print(f"\nSaved summary to: {summary_path}")
 
+    # Upload outputs to Hub
+    upload_outputs_to_hub(OUTPUT_DIR)
+
     print("\n" + "=" * 60)
     print("Evaluation complete!")
     print("=" * 60)
+
+
+def upload_outputs_to_hub(output_dir: Path):
+    """Upload evaluation outputs (metrics, plots, CSV) to HF Hub."""
+    from huggingface_hub import HfApi
+
+    repo_id = "michaelarutyunov/jtbd-test2-evaluation"
+    token = os.environ.get("HF_TOKEN")
+    if not token:
+        print("Warning: HF_TOKEN not set, skipping Hub upload")
+        return
+
+    api = HfApi(token=token)
+    try:
+        api.create_repo(repo_id, repo_type="dataset", exist_ok=True, private=True)
+    except Exception as e:
+        print(f"Warning: Could not create repo: {e}")
+
+    for f in output_dir.iterdir():
+        if f.is_file():
+            print(f"Uploading: {f.name}")
+            api.upload_file(
+                path_or_fileobj=str(f),
+                path_in_repo=f.name,
+                repo_id=repo_id,
+                repo_type="dataset",
+            )
+
+    print(f"Outputs uploaded to: https://huggingface.co/datasets/{repo_id}")
 
 
 if __name__ == "__main__":

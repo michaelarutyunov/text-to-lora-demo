@@ -76,6 +76,19 @@ hf jobs logs <job-id>
 
 See [`scripts/test2/TEST_2.md`](scripts/test2/TEST_2.md) for hardware options, resume commands, and troubleshooting.
 
+### 3. Download results (local)
+```bash
+# Evaluation outputs are uploaded to Hub automatically
+uv run python3 -c "
+from huggingface_hub import snapshot_download
+snapshot_download('michaelarutyunov/jtbd-test2-evaluation',
+                  repo_type='dataset',
+                  local_dir='outputs/test2/evaluation')
+"
+```
+
+Results analysis: [`scripts/test2/test_2_eval.md`](scripts/test2/test_2_eval.md)
+
 ## Technical Details
 
 - **Base model**: Mistral-7B-Instruct-v0.2
@@ -92,6 +105,7 @@ See [`scripts/test2/TEST_2.md`](scripts/test2/TEST_2.md) for hardware options, r
 | T2L adapters | `michaelarutyunov/jtbd-t2l-{jobtrigger,solutionapproach,painpoint}` |
 | QLoRA adapters | `michaelarutyunov/jtbd-qlora-{detector}-{size}` |
 | Datasets | `michaelarutyunov/jtbd-binary-{job-trigger,solution-approach,pain-point}` |
+| Evaluation outputs | `michaelarutyunov/jtbd-test2-evaluation` |
 
 ## References
 
