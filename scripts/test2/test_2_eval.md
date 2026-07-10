@@ -1,4 +1,4 @@
-# Test 2 — Evaluation Results
+# Test 2 - Evaluation Results
 
 ## Summary
 
@@ -39,15 +39,15 @@ Base model: Mistral-7B-Instruct-v0.2. Test set: 48 utterances per detector (same
 
 T2L (Text-to-LoRA) improves classification with **zero training examples** on 2 of 3 detectors:
 
-- **pain_point**: +0.193 macro F1 (0.448 → 0.641) — largest improvement
-- **job_trigger**: +0.143 macro F1 (0.314 → 0.457) — despite "trigger" being a domain-specific concept
-- **solution_approach**: −0.031 macro F1 (0.393 → 0.362) — slight degradation
+- **pain_point**: +0.193 macro F1 (0.448 → 0.641) - largest improvement
+- **job_trigger**: +0.143 macro F1 (0.314 → 0.457) - despite "trigger" being a domain-specific concept
+- **solution_approach**: −0.031 macro F1 (0.393 → 0.362) - slight degradation
 
 This validates T2L's core value proposition: task-specific adaptation without any labeled data.
 
 ### 2. T2L is competitive with QLoRA-50
 
-The crossover point — where supervised fine-tuning surpasses zero-data T2L — varies by detector:
+The crossover point - where supervised fine-tuning surpasses zero-data T2L - varies by detector:
 
 | Detector | T2L F1 | QLoRA crossover | QLoRA F1 at crossover |
 |----------|--------|-----------------|----------------------|
@@ -61,7 +61,7 @@ For **job_trigger**, T2L outperforms QLoRA even at 200 training examples, only l
 
 D2L (Doc-to-LoRA) produces barely measurable changes. For `job_trigger`, macro F1 edges from 0.314 to 0.345 (one additional correct "yes" prediction). For `solution_approach` and `pain_point`, D2L predictions remain identical to zero-shot.
 
-**Root cause**: The D2L hypernetwork generates `lora_B` weights that are 41× smaller in magnitude than T2L's. The adapter is not a no-op, but its effective contribution is near-zero. D2L targets `down_proj` (MLP layers), which encodes factual knowledge — but binary yes/no classification is dominated by attention patterns (`q_proj`/`v_proj`), not MLP activations.
+**Root cause**: The D2L hypernetwork generates `lora_B` weights that are 41× smaller in magnitude than T2L's. The adapter is not a no-op, but its effective contribution is near-zero. D2L targets `down_proj` (MLP layers), which encodes factual knowledge - but binary yes/no classification is dominated by attention patterns (`q_proj`/`v_proj`), not MLP activations.
 
 **D2L+T2L stacking now works correctly**: after fixing the key-path mismatch and adapter activation order (see Technical Notes), D2L+T2L matches T2L exactly across all detectors. The stacking mechanism is functional, but D2L's contribution is too weak to register on top of T2L.
 
@@ -76,7 +76,7 @@ This non-monotonicity is consistent with known behavior of fine-tuning on very s
 
 ### 5. Accuracy vs F1 disconnect
 
-Pain point accuracy is high across all conditions (0.812+) because the model can achieve 87% accuracy by predicting the majority class ("yes") for everything. Macro F1 reveals the true picture — most conditions barely outperform random on the minority class.
+Pain point accuracy is high across all conditions (0.812+) because the model can achieve 87% accuracy by predicting the majority class ("yes") for everything. Macro F1 reveals the true picture - most conditions barely outperform random on the minority class.
 
 ---
 
@@ -88,7 +88,7 @@ From `TEST_2.md`:
 |-----------|--------|--------|
 | D2L+T2L outperforms zero-shot on ≥2/3 detectors | D2L+T2L matches T2L; outperforms zero-shot on 2/3 | **Met** (via T2L; D2L adds nothing) |
 | D2L-only improves job_trigger (most JTBD-specific) | D2L-only: 0.314 → 0.345 (marginal) | **Marginally met** |
-| QLoRA crossover visible on learning curve | Yes — T2L competitive with QLoRA-50/200 | **Met** |
+| QLoRA crossover visible on learning curve | Yes - T2L competitive with QLoRA-50/200 | **Met** |
 | Confusion matrices show different error patterns | Pending analysis of confusion_matrices.png | **TBD** |
 | Commercially compelling cost-reduction narrative | T2L's zero-data performance enables this | **Partially met** |
 
@@ -132,14 +132,14 @@ The small test set (48 examples) and extreme imbalance (pain_point) mean results
 
 ## Outputs
 
-- `metrics.json` — per-condition metrics for all detectors
-- `summary.csv` — tabular summary
-- `plot_learning_curves_v2.png` — QLoRA learning curve with T2L baseline
-- `plot_t2l_lift.png` — T2L lift over zero-shot bar chart
-- `plot_heatmap.png` — full conditions × detectors heatmap
-- `plot_per_class_metrics.png` — precision/recall breakdown per class
-- `plot_confusion_comparison.png` — side-by-side confusion matrices
-- `plot_minority_recall.png` — minority class recall comparison
+- `metrics.json` - per-condition metrics for all detectors
+- `summary.csv` - tabular summary
+- `plot_learning_curves_v2.png` - QLoRA learning curve with T2L baseline
+- `plot_t2l_lift.png` - T2L lift over zero-shot bar chart
+- `plot_heatmap.png` - full conditions × detectors heatmap
+- `plot_per_class_metrics.png` - precision/recall breakdown per class
+- `plot_confusion_comparison.png` - side-by-side confusion matrices
+- `plot_minority_recall.png` - minority class recall comparison
 
 ---
 

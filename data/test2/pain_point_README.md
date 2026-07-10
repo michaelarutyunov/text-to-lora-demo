@@ -19,9 +19,9 @@ Labels are derived from graph node `source_quotes`: a turn is labeled "yes" if a
 
 ## Splits
 
-- **train**: 238 utterances from 19 interviews
-- **val**: 27 utterances from 3 interviews
-- **test**: 48 utterances from 5 interviews
+- **train**: 357 utterances from 19 interviews
+- **val**: 53 utterances from 3 interviews
+- **test**: 92 utterances from 5 interviews
 
 ## Data Fields
 

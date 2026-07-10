@@ -54,6 +54,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
+# Reduce CUDA memory fragmentation (required on L40S for D2L hypernetwork forward pass)
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 HF_TOKEN = os.environ.get("HF_TOKEN")
 BASE_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
 DATASET_REPO = "michaelarutyunov/test2-binary-detectors"

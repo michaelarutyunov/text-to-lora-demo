@@ -1,4 +1,4 @@
-# Test 2 — Debug Notes
+# Test 2 - Debug Notes
 
 All scripts run on HuggingFace Jobs via `hf jobs uv run` with PEP 723 inline dependencies. This document covers every issue encountered across all phases.
 
@@ -6,9 +6,9 @@ All scripts run on HuggingFace Jobs via `hf jobs uv run` with PEP 723 inline dep
 
 ## Quick-Start Recommendations
 
-**When do these apply?** You're running Sakana AI's hypernetworks (Doc-to-LoRA and/or Text-to-LoRA) on **managed cloud GPU infrastructure** — specifically HuggingFace Jobs, but the same issues arise on any platform where you don't control the base Docker image (e.g. Modal, Replicate, cloud notebooks).
+**When do these apply?** You're running Sakana AI's hypernetworks (Doc-to-LoRA and/or Text-to-LoRA) on **managed cloud GPU infrastructure** - specifically HuggingFace Jobs, but the same issues arise on any platform where you don't control the base Docker image (e.g. Modal, Replicate, cloud notebooks).
 
-If you're running on a machine where you control the full stack (bare-metal, your own Docker image, a local workstation with `nvcc`), most of these issues disappear — just follow each repo's `install.sh`.
+If you're running on a machine where you control the full stack (bare-metal, your own Docker image, a local workstation with `nvcc`), most of these issues disappear - just follow each repo's `install.sh`.
 
 ### Key decisions summarised
 
@@ -17,7 +17,7 @@ If you're running on a machine where you control the full stack (bare-metal, you
 | Pin `torch==2.6.0` | D2L, T2L | Unpinned torch resolves to bleeding-edge (2.10+) with zero flash-attn wheel availability |
 | Set `torch-backend = "cu124"` | D2L, T2L | Gives `cxx11abiFALSE` ABI build of torch, matching flash-attn wheels |
 | Install flash-attn via pre-built wheel URL | D2L only | No `nvcc` on managed platforms; compilation impossible. T2L can use eager attention instead |
-| Patch T2L source: `use_flash_attn=False` | T2L only | T2L defaults to flash-attn but doesn't actually need it — its hypernetwork uses standard attention |
+| Patch T2L source: `use_flash_attn=False` | T2L only | T2L defaults to flash-attn but doesn't actually need it - its hypernetwork uses standard attention |
 | Install T2L transitive deps at runtime | T2L | The `hyper_llm_modulator` package eagerly imports wandb, torchmetrics, inflect etc. at module level |
 | Patch T2L chat template path to absolute | T2L | T2L uses relative `chat_templates/` path; HF Jobs CWD isn't the repo root |
 | Use `uv pip install --python <path>` | All | Bare `pip` installs to system Python, not the uv venv. `python -m pip` also fails (uv venvs don't include pip) |
@@ -30,7 +30,7 @@ If you're running on a machine where you control the full stack (bare-metal, you
 
 ### Don't bother trying
 
-- **Eager/SDPA attention fallback for D2L**: D2L's perceiver forward pass is tightly coupled to flash-attn's unpad/pad data layout. We spent 8 submissions learning this. T2L is different — eager works fine.
+- **Eager/SDPA attention fallback for D2L**: D2L's perceiver forward pass is tightly coupled to flash-attn's unpad/pad data layout. We spent 8 submissions learning this. T2L is different - eager works fine.
 - **Adding flash-attn to PEP 723 deps**: uv builds packages in isolation, so torch isn't available during flash-attn's build step. Must install at runtime.
 - **Installing T2L as a package (`uv pip install /tmp/text-to-lora`)**: Its `pyproject.toml` pins `transformers==4.46.2` which conflicts with our deps, causing partial version corruption. Use `sys.path.insert` + install only the missing transitive deps.
 
@@ -40,11 +40,11 @@ If you're running on a machine where you control the full stack (bare-metal, you
 
 **Script**: `stage_d2l_hf_jobs.py`
 **Total submissions**: ~18 | **Estimated compute cost**: ~$15
-**Status**: RESOLVED — adapter at `michaelarutyunov/jtbd-d2l-mistral7b-methodology`
+**Status**: RESOLVED - adapter at `michaelarutyunov/jtbd-d2l-mistral7b-methodology`
 
 ## Background
 
-D2L runs Sakana AI's hypernetwork to convert the JTBD methodology document into LoRA weights. This is a single forward pass — no training involved. The script clones the D2L repository, loads the checkpoint, feeds in the methodology text, and extracts the resulting LoRA weight matrices.
+D2L runs Sakana AI's hypernetwork to convert the JTBD methodology document into LoRA weights. This is a single forward pass - no training involved. The script clones the D2L repository, loads the checkpoint, feeds in the methodology text, and extracts the resulting LoRA weight matrices.
 
 The main challenge: D2L's internal perceiver module **requires flash-attn**, a high-performance CUDA library that is notoriously difficult to install outside of pre-configured environments.
 
@@ -99,7 +99,7 @@ subprocess.run(["uv", "pip", "install", "--python", sys.executable, WHEEL_URL], 
 
 **Symptom**: `ImportError: FlashAttention2 has been toggled on, but it cannot be used... the package flash_attn seems to be not installed`
 
-**Root cause**: D2L uses a custom version of `Idefics2Perceiver` (a vision-language component repurposed as a context aggregator). This component's attention mechanism is hard-coded to use `flash_attention_2` — there is literally no fallback:
+**Root cause**: D2L uses a custom version of `Idefics2Perceiver` (a vision-language component repurposed as a context aggregator). This component's attention mechanism is hard-coded to use `flash_attention_2` - there is literally no fallback:
 
 ```python
 # In D2L's idefics2.py
@@ -114,11 +114,11 @@ IDEFICS2_PERCEIVER_ATTENTION_CLASSES = {
 | # | Approach | Result |
 |---|---------|--------|
 | 2a | Pass `attn_implementation: "eager"` to base model | Only affects Mistral, not perceiver |
-| 2b | Monkey-patch `_check_and_adjust_attn_implementation` | `AttributeError` — it's a staticmethod |
-| 2c | Force "sdpa" attention | `KeyError: 'sdpa'` — not in perceiver dict |
-| 2d | Force "eager" attention | `KeyError: 'eager'` — commented out in source |
+| 2b | Monkey-patch `_check_and_adjust_attn_implementation` | `AttributeError` - it's a staticmethod |
+| 2c | Force "sdpa" attention | `KeyError: 'sdpa'` - not in perceiver dict |
+| 2d | Force "eager" attention | `KeyError: 'eager'` - commented out in source |
 | 2e | Patch D2L source to uncomment eager | Second class `Idefics2PerceiverResampler` hit |
-| 2f | Patch all `super().__init__()` calls | Init works, forward fails — `unpad_input` missing |
+| 2f | Patch all `super().__init__()` calls | Init works, forward fails - `unpad_input` missing |
 | 2g | Provide pure-Python shims for `unpad_input`/`pad_input` | New kwarg error (`is_cross_attn`) |
 | 2h | Filter kwargs by signature | Tensor shape mismatch (batch dim 1 vs 32) |
 
@@ -137,7 +137,7 @@ flash-attn contains custom CUDA kernels that must be compiled against the exact 
 | 3c | Install setuptools first | Still no `nvcc` |
 | 3d | Pre-built wheels from GitHub | Wrong naming convention, then wrong torch version |
 | 3e | Pin torch to 2.6.x | Matches available wheel versions |
-| 3f | Add flash-attn to PEP 723 deps | uv build isolation — no torch during build |
+| 3f | Add flash-attn to PEP 723 deps | uv build isolation - no torch during build |
 | 3g | Correct wheel + pip at runtime | pip installs to wrong env |
 
 ---
@@ -168,7 +168,7 @@ flash-attn contains custom CUDA kernels that must be compiled against the exact 
 
 ## D2L Issue 7: ABI mismatch between torch and flash-attn
 
-**Symptom**: `undefined symbol: _ZN3c105ErrorC2E...` — C++ ABI symbol mismatch.
+**Symptom**: `undefined symbol: _ZN3c105ErrorC2E...` - C++ ABI symbol mismatch.
 
 **Root cause**: PyPI torch uses `cxx11abiTRUE`, but flash-attn wheels need `cxx11abiFALSE` (matching `--torch-backend=cu124`).
 
@@ -198,11 +198,11 @@ flash-attn contains custom CUDA kernels that must be compiled against the exact 
 
 ## D2L Issue 10: PEFT weight key naming convention
 
-**Symptom**: `UserWarning: Found missing adapter keys` — all 64 keys listed as missing.
+**Symptom**: `UserWarning: Found missing adapter keys` - all 64 keys listed as missing.
 
 **Cause**: PEFT expects `base_model.model.model.layers.{i}.mlp.down_proj.lora_A.default.weight`. We saved without `.model` prefix and `.default` adapter name.
 
-**Impact**: Adapter loads with zero weights — silently defeats the experiment.
+**Impact**: Adapter loads with zero weights - silently defeats the experiment.
 
 **Fix**: Changed key format to match PEFT's convention exactly.
 
@@ -214,11 +214,11 @@ flash-attn contains custom CUDA kernels that must be compiled against the exact 
 
 **Script**: `stage_t2l_hf_jobs.py`
 **Total submissions**: ~7 | **Estimated compute cost**: ~$5
-**Status**: RESOLVED — all 3 adapters on Hub
+**Status**: RESOLVED - all 3 adapters on Hub
 
 ## Background
 
-T2L runs Sakana AI's hypernetwork to convert task descriptions into LoRA weights. Unlike D2L, this is a simpler pipeline — embed the task description, run through the hypernetwork, extract LoRA weights. Three adapters generated (one per binary detector: job_trigger, solution_approach, pain_point).
+T2L runs Sakana AI's hypernetwork to convert task descriptions into LoRA weights. Unlike D2L, this is a simpler pipeline - embed the task description, run through the hypernetwork, extract LoRA weights. Three adapters generated (one per binary detector: job_trigger, solution_approach, pain_point).
 
 Key difference from D2L: T2L's hypernetwork does NOT require flash-attn for its forward pass. It only defaults to flash-attn for loading the base model, which can be patched to use eager attention.
 
@@ -238,7 +238,7 @@ Key difference from D2L: T2L's hypernetwork does NOT require flash-attn for its 
 
 **Symptom**: Sequential `ModuleNotFoundError` for `inflect`, then `torchmetrics`, then `wandb`.
 
-**Root cause**: T2L's `hyper_llm_modulator` package eagerly imports everything at module level — `utils/__init__.py` imports `metric_fns.py` (which needs `torchmetrics`, `inflect`) and `utils.py` (which needs `wandb`), even though none of these are needed for the generation-only code path we use.
+**Root cause**: T2L's `hyper_llm_modulator` package eagerly imports everything at module level - `utils/__init__.py` imports `metric_fns.py` (which needs `torchmetrics`, `inflect`) and `utils.py` (which needs `wandb`), even though none of these are needed for the generation-only code path we use.
 
 This is a common pattern in ML research repos: the codebase is a monolith designed to run in one conda environment with all 30+ packages installed. The authors never tested importing just the generation path in isolation.
 
@@ -259,7 +259,7 @@ subprocess.run(
 
 **Symptom**: `FlashAttention2 has been toggled on, but it cannot be used`
 
-**Cause**: T2L's `get_model_and_tokenizer()` defaults to `use_flash_attn=True`. Unlike D2L, T2L doesn't need flash-attn for its forward pass — only the model loader uses this flag.
+**Cause**: T2L's `get_model_and_tokenizer()` defaults to `use_flash_attn=True`. Unlike D2L, T2L doesn't need flash-attn for its forward pass - only the model loader uses this flag.
 
 **Fix**: Patch the cloned source after cloning:
 ```python
@@ -317,7 +317,7 @@ os.environ["HF_HUB_TRUST_REMOTE_CODE"] = "1"
 
 **Symptom**: `RepositoryNotFoundError: 404` for `michaelarutyunov/jtbd-t2l-jobtrigger`
 
-**Cause**: The T2L job from the earlier session had actually failed (all 3 adapters errored with `ModuleNotFoundError`) but the script exited with code 0 — the orchestrator thought it succeeded.
+**Cause**: The T2L job from the earlier session had actually failed (all 3 adapters errored with `ModuleNotFoundError`) but the script exited with code 0 - the orchestrator thought it succeeded.
 
 **Fix**: Fixed T2L script (see Part 2), added `sys.exit(1)` when all adapters fail.
 
@@ -336,7 +336,7 @@ os.environ["HF_HUB_TRUST_REMOTE_CODE"] = "1"
 # Part 4: QLoRA Training
 
 **Script**: `train_qlora_hf_jobs.py`
-**Total submissions**: 3 | **Status**: RESOLVED — all 12 adapters on Hub
+**Total submissions**: 3 | **Status**: RESOLVED - all 12 adapters on Hub
 
 ## QLoRA Issue 1: `max_seq_length` renamed in TRL
 
@@ -364,7 +364,7 @@ os.environ["HF_HUB_TRUST_REMOTE_CODE"] = "1"
 
 **Cause**: Post-training step tries to update `evaluate_conditions.py` with Hub IDs, but on HF Jobs the script's `__file__` resolves to `//train_qlora_hf_jobs.py`, making the sibling path `/evaluate_conditions.py`.
 
-**Impact**: Non-critical — all 12 adapters already pushed to Hub. Only the convenience auto-update of eval script failed.
+**Impact**: Non-critical - all 12 adapters already pushed to Hub. Only the convenience auto-update of eval script failed.
 
 **Fix**: Wrapped `update_evaluate_script()` in try/except.
 
@@ -373,7 +373,7 @@ os.environ["HF_HUB_TRUST_REMOTE_CODE"] = "1"
 # Part 5: Evaluation
 
 **Script**: `evaluate_conditions.py`
-**Total submissions**: 4 | **Status**: RESOLVED — full evaluation complete
+**Total submissions**: 4 | **Status**: RESOLVED - full evaluation complete
 
 ## Evaluate Issue 1: Tokenizer missing pad token
 
@@ -403,7 +403,7 @@ os.environ["HF_HUB_TRUST_REMOTE_CODE"] = "1"
 
 **Fix**: Changed to `adapter_name="default"` to match the saved key names.
 
-**Note**: D2L-only (Stage 1b) was unaffected — it uses `PeftModel.from_pretrained()` without `adapter_name`, which defaults to `"default"`. However, D2L still shows no effect on classification (identical to zero-shot). This appears to be a genuine experimental result: D2L's `down_proj` modifications encode factual knowledge but don't influence binary yes/no classification decisions.
+**Note**: D2L-only (Stage 1b) was unaffected - it uses `PeftModel.from_pretrained()` without `adapter_name`, which defaults to `"default"`. However, D2L still shows no effect on classification (identical to zero-shot). This appears to be a genuine experimental result: D2L's `down_proj` modifications encode factual knowledge but don't influence binary yes/no classification decisions.
 
 ---
 
@@ -454,36 +454,36 @@ os.environ["HF_HUB_TRUST_REMOTE_CODE"] = "1"
 | # | Issue | Fix Applied | Result |
 |---|-------|-------------|--------|
 | 1 | Missing `datasets` dep | Added to PEP 723 | Fixed |
-| 2 | flash_attn ImportError (init) | `use_flash_attn=False` | Failed — doesn't affect perceiver |
-| 3 | flash_attn ImportError (perceiver) | Monkey-patch attn check | Failed — staticmethod signature |
-| 4 | flash_attn ImportError (perceiver) | Patch idefics2.py source | Partially fixed — second class hit |
-| 5 | flash_attn ImportError (resampler) | Patch all super().__init__ | Fixed init — forward fails |
-| 6 | `unpad_input` not defined | Pure-Python shims | Fixed — new kwarg error |
-| 7 | `is_cross_attn` unexpected kwarg | Filter kwargs by signature | Fixed — tensor shape mismatch |
-| 8 | Tensor shape mismatch (eager) | **Dead end** — eager path incompatible | Abandoned eager approach |
-| 9 | pip installs to wrong env | `sys.executable -m pip` | Failed — no pip in uv env |
+| 2 | flash_attn ImportError (init) | `use_flash_attn=False` | Failed - doesn't affect perceiver |
+| 3 | flash_attn ImportError (perceiver) | Monkey-patch attn check | Failed - staticmethod signature |
+| 4 | flash_attn ImportError (perceiver) | Patch idefics2.py source | Partially fixed - second class hit |
+| 5 | flash_attn ImportError (resampler) | Patch all super().__init__ | Fixed init - forward fails |
+| 6 | `unpad_input` not defined | Pure-Python shims | Fixed - new kwarg error |
+| 7 | `is_cross_attn` unexpected kwarg | Filter kwargs by signature | Fixed - tensor shape mismatch |
+| 8 | Tensor shape mismatch (eager) | **Dead end** - eager path incompatible | Abandoned eager approach |
+| 9 | pip installs to wrong env | `sys.executable -m pip` | Failed - no pip in uv env |
 | 10 | No pip module in uv env | `uv pip install --python` | Fixed |
 | 11 | OOM on L40S (48GB) | Switch to A100 (80GB) | Fixed |
-| 12 | Wrong wheel names | Checked GitHub releases API | Fixed — `cu12` not `cu124` |
+| 12 | Wrong wheel names | Checked GitHub releases API | Fixed - `cu12` not `cu124` |
 | 13 | Wrong torch (2.10+cu128) | Pin torch to 2.6.0 | Fixed |
 | 14 | ABI mismatch (TRUE vs FALSE) | `torch-backend=cu124` + FALSE wheel | **flash-attn works!** |
 | 15 | KeyError: hypernet_config | Read from model attr + fallback | Fixed |
 | 16 | KeyError: peft_type | Added to adapter_config.json + pin peft>=0.14.0 | Fixed |
 | 17 | Wrong PEFT key naming | Added `.model` prefix + `.default` adapter name | Fixed |
-| 18 | Final run with all fixes | — | **Success** — adapter on Hub |
+| 18 | Final run with all fixes | - | **Success** - adapter on Hub |
 
 ## T2L Submissions
 
 | # | Issue | Fix Applied | Result |
 |---|-------|-------------|--------|
-| 1 | `hyper_llm_modulator` not found | `sys.path` → `src/` subdir | Fixed — next import fails |
-| 2 | Missing `inflect` | Added to runtime deps | Fixed — next import fails |
+| 1 | `hyper_llm_modulator` not found | `sys.path` → `src/` subdir | Fixed - next import fails |
+| 2 | Missing `inflect` | Added to runtime deps | Fixed - next import fails |
 | 3 | Missing `torchmetrics` | Tried full package install | transformers version conflict |
-| 4 | transformers version conflict | `--no-deps` + explicit dep list | Fixed — next import fails |
-| 5 | Missing `wandb` | Added to runtime dep list | Fixed — flash-attn error |
-| 6 | flash_attn not installed | Patched `use_flash_attn=False` in source | Fixed — template path error |
-| 7 | Chat template path not found | Patched to absolute path | Fixed — args attribute error |
-| 8 | `args.lora_r` not found | Use `hypermod.peft_config` | **Success** — all 3 adapters on Hub |
+| 4 | transformers version conflict | `--no-deps` + explicit dep list | Fixed - next import fails |
+| 5 | Missing `wandb` | Added to runtime dep list | Fixed - flash-attn error |
+| 6 | flash_attn not installed | Patched `use_flash_attn=False` in source | Fixed - template path error |
+| 7 | Chat template path not found | Patched to absolute path | Fixed - args attribute error |
+| 8 | `args.lora_r` not found | Use `hypermod.peft_config` | **Success** - all 3 adapters on Hub |
 
 ## Validate Submissions
 
@@ -496,16 +496,16 @@ os.environ["HF_HUB_TRUST_REMOTE_CODE"] = "1"
 
 | # | Issue | Fix Applied | Result |
 |---|-------|-------------|--------|
-| 1 | `max_seq_length` renamed in TRL | Changed to `max_length` | Fixed — next error |
+| 1 | `max_seq_length` renamed in TRL | Changed to `max_length` | Fixed - next error |
 | 2 | `tokenizer` renamed in TRL | Changed to `processing_class` | Fixed |
-| 3 | All fixes applied | — | All 12 adapters pushed — crashed on post-training step |
-| 3† | `FileNotFoundError: evaluate_conditions.py` | Wrapped in try/except | Non-critical — only updates eval script with Hub IDs |
+| 3 | All fixes applied | - | All 12 adapters pushed - crashed on post-training step |
+| 3† | `FileNotFoundError: evaluate_conditions.py` | Wrapped in try/except | Non-critical - only updates eval script with Hub IDs |
 
 ## Evaluate Submissions
 
 | # | Issue | Fix Applied | Result |
 |---|-------|-------------|--------|
-| 1 | Tokenizer missing pad token | Added `pad_token = eos_token` + `padding_side = "left"` | Fixed — QLoRA adapters skipped |
+| 1 | Tokenizer missing pad token | Added `pad_token = eos_token` + `padding_side = "left"` | Fixed - QLoRA adapters skipped |
 | 2 | QLoRA adapter IDs all `None` | Filled in Hub IDs manually | Fixed |
 | 3 | D2L stacked adapter_name mismatch | Changed `adapter_name="d2l_jtbd"` → `"default"` | Fixed |
-| 4 | All fixes applied | — | **Success** — full evaluation complete |
+| 4 | All fixes applied | - | **Success** - full evaluation complete |
